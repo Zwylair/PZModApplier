@@ -1,87 +1,89 @@
-from os import remove, system
-from os.path import isdir
-from subprocess import call
-from shutil import rmtree, copy, copytree
+import os
+import time
+import shutil
+import subprocess
+from datetime import datetime
+import psutil
 
-NAME = 'Project Zomboid Mod Manager'
-LIBS = ['icon.ico', 'unrar.exe', 'modules', 'mods']
-BUILD_SPEC_FN = 'build.spec'
 
-build_spec = "# -*- mode: python ; coding: utf-8 -*-\n" \
-             "\n" \
-             f"NAME = '{NAME}'\n" \
-             "\n" \
-             "block_cipher = None\n" \
-             "\n" \
-             "a = Analysis(\n" \
-             "    ['main.py'],\n" \
-             "    pathex=[],\n" \
-             "    binaries=[],\n" \
-             "    datas=[],\n" \
-             "    hiddenimports=[],\n" \
-             "    hookspath=[],\n" \
-             "    hooksconfig={},\n" \
-             "    runtime_hooks=[],\n" \
-             "    excludes=[],\n" \
-             "    win_no_prefer_redirects=False,\n" \
-             "    win_private_assemblies=False,\n" \
-             "    cipher=block_cipher,\n" \
-             "    noarchive=False,\n" \
-             ")\n" \
-             "pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)\n" \
-             "\n" \
-             "exe = EXE(\n" \
-             "    pyz,\n" \
-             "    a.scripts,\n" \
-             "    [],\n" \
-             "    exclude_binaries=True,\n" \
-             "    name=NAME,\n" \
-             "    debug=False,\n" \
-             "    bootloader_ignore_signals=False,\n" \
-             "    strip=False,\n" \
-             "    upx=True,\n" \
-             "    console=False,\n" \
-             "    disable_windowed_traceback=False,\n" \
-             "    argv_emulation=False,\n" \
-             "    target_arch=None,\n" \
-             "    codesign_identity=None,\n" \
-             "    entitlements_file=None,\n" \
-             "    icon=['icon.ico'],\n" \
-             ")\n" \
-             "coll = COLLECT(\n" \
-             "    exe,\n" \
-             "    a.binaries,\n" \
-             "    a.zipfiles,\n" \
-             "    a.datas,\n" \
-             "    strip=False,\n" \
-             "    upx=True,\n" \
-             "    upx_exclude=[],\n" \
-             "    name=NAME,\n" \
-             ")\n"
+class Executable:
+    def __init__(self, filepath: str, allow_console: bool = True, icon_path: str | None = None):
+        self.filepath = filepath
+        self.allow_console = allow_console
+        self.icon_path = icon_path  # allowed: png, ico
 
-for _ in ['dist', 'build']:
-    try:
-        rmtree(_)
-    except BaseException:
-        pass
 
-# Create Pyinstaller Build File
-with open(BUILD_SPEC_FN, 'w') as file:
-    file.write(build_spec)
+PYTHON_INTERPRETER_PATH = f'{os.getenv("localappdata")}/programs/python/python311/python.exe'
+REQ_PACKAGES = ['nuitka==1.9.3']
+COPY_DIRS = ['bin']
+COPY_FILES = []
+EXECUTABLES = [
+    Executable('main.py', False, 'bin/icon.ico'),
+]
 
-# Start Building
-system(f'pyinstaller {BUILD_SPEC_FN}')
 
-# Copy Files
-for _ in LIBS:
-    try:
-        if isdir(_):
-            copytree(_, f'dist/{NAME}/{_}')
-        else:
-            copy(_, f'dist/{NAME}/{_}')
-    except BaseException:
-        pass
+def move_dir_with_overwrite(source_dir: str, target_dir: str):
+    for file in os.listdir(source_dir):
+        shutil.move(os.path.join(source_dir, file), os.path.join(target_dir, file))
 
-remove(BUILD_SPEC_FN)
 
-call(f'dist/{NAME}/{NAME}.exe')
+# statisfy requirements
+
+os.system(f'{PYTHON_INTERPRETER_PATH} -m pip install -r requirements.txt')
+for i in REQ_PACKAGES:
+    os.system(f'{PYTHON_INTERPRETER_PATH} -m pip install {i}')
+
+if os.path.exists('dist'):
+    shutil.rmtree('dist')
+os.mkdir('dist')
+
+
+# build
+for exe in EXECUTABLES:
+    print(f'start building {exe.filepath}')
+
+    args = [
+        '--standalone',
+        '--no-pyi-file',
+        f'--windows-icon-from-ico={exe.icon_path}' if exe.icon_path is not None else '',
+        '' if exe.allow_console else '--disable-console'
+    ]
+
+    subprocess.Popen(f'cmd /c start cmd /c {PYTHON_INTERPRETER_PATH} -m nuitka {" ".join([i for i in args if i])} {exe.filepath}')
+    made_time = datetime.now().strftime('%H:%M:%S')
+    exe_no_extension, _ = os.path.splitext(exe.filepath)
+
+    # wait for a while to make sure cmd is started
+    time.sleep(2)
+
+    for process in psutil.process_iter(['pid', 'name']):
+        process_made_time = datetime.fromtimestamp(process.create_time()).strftime('%H:%M:%S')
+
+        if process_made_time == made_time and process.name() == 'cmd.exe':
+            while True:
+                try:
+                    process.status()  # idle request which causes error when closed
+                    time.sleep(1)
+                except psutil.NoSuchProcess:
+                    move_dir_with_overwrite(f'{exe_no_extension}.dist', 'dist')
+                    shutil.rmtree(f'{exe_no_extension}.dist')
+
+                    print(f'{exe.filepath} building finished')
+                    break
+    print()
+
+print('copying additional files')
+
+for i in COPY_DIRS:
+    if isinstance(i, str):
+        shutil.copytree(i, f'dist/{i}')
+    elif isinstance(i, dict):
+        shutil.copytree(i['input'], f'dist/{i["output"]}')
+
+for i in COPY_FILES:
+    if isinstance(i, str):
+        shutil.copytree(i, f'main.dist/{i}')
+    elif isinstance(i, dict):
+        shutil.copytree(i['input'], f'dist/{i["output"]}')
+
+print('done')
